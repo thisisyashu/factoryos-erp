@@ -1,36 +1,97 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# FactoryOS ERP
 
-## Getting Started
+Enterprise ERP prototype for a mid-size electronics / semiconductor manufacturing company, with deep focus on **Master Data Governance (MDG)**, approval workflows, audit trails, and end-to-end traceability from supplier to customer.
 
-First, run the development server:
+> Built as a portfolio project to demonstrate enterprise ERP transformation thinking, MDG governance design, manufacturing process modeling, and AI-assisted full-stack development.
+
+## Why this project
+
+Most ERP demos are CRUD apps with no governance. Real ERPs live and die by master data quality — a wrong supplier record causes payment failures, a wrong BOM causes production scrap, a wrong material status breaks every downstream transaction.
+
+FactoryOS makes MDG the centerpiece, not an afterthought:
+
+- Controlled status lifecycle (Draft → Submitted → In Review → Approved → Active → Inactive)
+- No transaction can use unapproved master data
+- Every change goes through an approval workflow
+- Every action writes an immutable audit log
+- Duplicate detection at request time, not after the fact
+- Data quality scoring on every record
+
+## Tech stack
+
+- Next.js 15 (App Router)
+- TypeScript
+- Tailwind CSS + shadcn/ui
+- PostgreSQL (Neon)
+- Prisma ORM
+- NextAuth (Auth.js v5)
+- Zod for validation
+
+## Modules
+
+| # | Module | Status |
+|---|---|---|
+| 1 | Master Data Governance (MDG) | 🟡 Phase 1 in progress |
+| 2 | Procure-to-Pay | ⚪ Phase 2 |
+| 3 | Order-to-Cash | ⚪ Phase 4 |
+| 4 | Plan-to-Produce | ⚪ Phase 3 |
+| 5 | Inventory Management | ⚪ Phase 2 |
+| 6 | Demand & Supply Planning | ⚪ Phase 5 |
+| 7 | Record-to-Report (Finance) | ⚪ Phase 5 |
+| 8 | Quality Management | ⚪ Phase 5 |
+| 9 | Asset / Work Center Maintenance | ⚪ Phase 5 |
+| 10 | Reporting & Traceability | ⚪ Phase 5 |
+
+## Phase 1 scope
+
+The MDG foundation:
+
+- Material, Supplier, Customer master data
+- Approval workflow engine
+- Audit log
+- Duplicate detection
+- Data quality scoring
+- Role-based access control (Requester, Steward, Approver, Admin, Viewer)
+
+See [`docs/phase-1-spec.md`](docs/phase-1-spec.md) for screen specifications and [`docs/architecture.md`](docs/architecture.md) for system design.
+
+## Getting started
 
 ```bash
+npm install
+
+cp .env.example .env
+# Edit .env and paste your Neon DATABASE_URL
+
+npx prisma migrate dev
+npx prisma db seed
+
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Seeded login credentials
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+All users have password `password123`:
 
-## Learn More
+| Email | Role |
+|---|---|
+| requester@factoryos.com | Requester |
+| steward@factoryos.com | Steward |
+| approver@factoryos.com | Approver |
+| admin@factoryos.com | Admin |
 
-To learn more about Next.js, take a look at the following resources:
+## Roadmap
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- [x] Phase 1.0 — Project scaffold, MDG schema, seed data, documentation
+- [ ] Phase 1.1 — Auth + layout shell
+- [ ] Phase 1.2 — Material master CRUD + approval workflow
+- [ ] Phase 1.3 — Supplier + Customer master with duplicate detection
+- [ ] Phase 1.4 — Approval inbox
+- [ ] Phase 1.5 — Audit history viewer
+- [ ] Phase 1.6 — MDG dashboard
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## License
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT

@@ -1,0 +1,274 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  REQUESTER
+  STEWARD
+  APPROVER
+  ADMIN
+  VIEWER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         UserRole @default(REQUESTER)
+  department   String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  mdgRequestsCreated  MdgRequest[]  @relation("RequestedBy")
+  mdgApprovals        MdgApproval[]
+  auditLogs           AuditLog[]
+}
+
+enum MasterDataStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  ACTIVE
+  INACTIVE
+  REJECTED
+}
+
+enum MaterialType {
+  RAW_MATERIAL
+  COMPONENT
+  SEMI_FINISHED
+  FINISHED_GOOD
+  CONSUMABLE
+  SPARE_PART
+}
+
+model UnitOfMeasure {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  description String
+  category    String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  materials   Material[]
+}
+
+model Material {
+  id              String           @id @default(cuid())
+  materialNumber  String           @unique
+  name            String
+  description     String?
+  type            MaterialType
+  status          MasterDataStatus @default(DRAFT)
+
+  unitOfMeasureId String
+  unitOfMeasure   UnitOfMeasure    @relation(fields: [unitOfMeasureId], references: [id])
+  weightKg        Decimal?         @db.Decimal(12, 4)
+  hazardClass     String?
+  shelfLifeDays   Int?
+
+  standardCost    Decimal?         @db.Decimal(14, 4)
+  leadTimeDays    Int?
+
+  dataQualityScore Int             @default(0)
+  createdById      String
+  approvedById     String?
+  approvedAt       DateTime?
+  activatedAt      DateTime?
+
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  mdgRequests      MdgRequest[]
+
+  @@index([status])
+  @@index([type])
+}
+
+model Supplier {
+  id               String           @id @default(cuid())
+  supplierNumber   String           @unique
+  legalName        String
+  tradeName        String?
+  taxId            String?
+  status           MasterDataStatus @default(DRAFT)
+
+  contactEmail     String?
+  contactPhone     String?
+  addressLine1     String?
+  addressLine2     String?
+  city             String?
+  stateRegion      String?
+  postalCode       String?
+  country          String?
+
+  paymentTermsDays Int?
+  currency         String?
+  preferredFlag    Boolean          @default(false)
+
+  dataQualityScore Int              @default(0)
+  createdById      String
+  approvedById     String?
+  approvedAt       DateTime?
+  activatedAt      DateTime?
+
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  mdgRequests      MdgRequest[]
+
+  @@index([status])
+}
+
+model Customer {
+  id               String           @id @default(cuid())
+  customerNumber   String           @unique
+  legalName        String
+  tradeName        String?
+  taxId            String?
+  status           MasterDataStatus @default(DRAFT)
+
+  contactEmail     String?
+  contactPhone     String?
+  addressLine1     String?
+  city             String?
+  country          String?
+
+  creditLimit      Decimal?         @db.Decimal(14, 2)
+  paymentTermsDays Int?
+  currency         String?
+
+  dataQualityScore Int              @default(0)
+  createdById      String
+  approvedById     String?
+  approvedAt       DateTime?
+  activatedAt      DateTime?
+
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  mdgRequests      MdgRequest[]
+
+  @@index([status])
+}
+
+enum MdgEntityType {
+  MATERIAL
+  SUPPLIER
+  CUSTOMER
+  BOM
+  ROUTING
+  WORK_CENTER
+  WAREHOUSE
+  UNIT_OF_MEASURE
+}
+
+enum MdgRequestType {
+  CREATE
+  CHANGE
+  DEACTIVATE
+  REACTIVATE
+}
+
+enum MdgRequestStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model MdgRequest {
+  id                    String           @id @default(cuid())
+  requestNumber         String           @unique
+  entityType            MdgEntityType
+  requestType           MdgRequestType
+  status                MdgRequestStatus @default(DRAFT)
+
+  payload               Json
+  businessJustification String?
+
+  requestedById         String
+  requestedBy           User             @relation("RequestedBy", fields: [requestedById], references: [id])
+  submittedAt           DateTime?
+
+  completenessScore     Int              @default(0)
+  duplicateRiskScore    Int              @default(0)
+  validationErrors      Json?
+
+  materialId            String?
+  material              Material?        @relation(fields: [materialId], references: [id])
+  supplierId            String?
+  supplier              Supplier?        @relation(fields: [supplierId], references: [id])
+  customerId            String?
+  customer              Customer?        @relation(fields: [customerId], references: [id])
+
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  approvals             MdgApproval[]
+  duplicates            MdgDuplicateCandidate[]
+
+  @@index([status])
+  @@index([entityType])
+}
+
+enum ApprovalDecision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model MdgApproval {
+  id           String           @id @default(cuid())
+  requestId    String
+  request      MdgRequest       @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approverId   String
+  approver     User             @relation(fields: [approverId], references: [id])
+  stepOrder    Int
+  decision     ApprovalDecision @default(PENDING)
+  comments     String?
+  decidedAt    DateTime?
+  createdAt    DateTime         @default(now())
+
+  @@index([requestId])
+  @@index([approverId, decision])
+}
+
+model MdgDuplicateCandidate {
+  id              String        @id @default(cuid())
+  requestId       String
+  request         MdgRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  candidateType   MdgEntityType
+  candidateId     String
+  similarityScore Int
+  reasoning       String?
+  resolved        Boolean       @default(false)
+  resolution      String?
+  createdAt       DateTime      @default(now())
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  entityType  String
+  entityId    String
+  action      String
+  actorId     String
+  actor       User     @relation(fields: [actorId], references: [id])
+  beforeState Json?
+  afterState  Json?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
