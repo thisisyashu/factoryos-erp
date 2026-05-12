@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "migrate": "prisma migrate dev",
+    "postmigrate": "prisma generate"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
