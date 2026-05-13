@@ -40,6 +40,8 @@ model User {
   routingsCreated          Routing[]           @relation("RoutingCreatedBy")
   productionOrdersCreated  ProductionOrder[]   @relation("PoCreatedBy")
   productionOrdersReleased ProductionOrder[]   @relation("PoReleasedBy")
+
+  lotConsumptionsPosted    MaterialLotConsumption[] @relation("LotConsumptionPostedBy")
 }
 
 enum MasterDataStatus {
@@ -80,6 +82,9 @@ model UnitOfMeasure {
   bomLines                     BillOfMaterialLine[]
   productionOrderHeaderUoms    ProductionOrder[]            @relation("PoUom")
   productionOrderComponentUoms ProductionOrderComponent[]   @relation("PoComponentUom")
+
+  materialLots          MaterialLot[]
+  finishedGoodLotUoms   FinishedGoodLot[]            @relation("FgLotUom")
 }
 
 model Material {
@@ -122,6 +127,9 @@ model Material {
   productionOrdersAsParent  ProductionOrder[]            @relation("PoParent")
   productionOrderComponents ProductionOrderComponent[]   @relation("PoComponentMaterial")
 
+  materialLots     MaterialLot[]
+  finishedGoodLots FinishedGoodLot[]     @relation("FgLotMaterial")
+
   @@index([status])
   @@index([type])
 }
@@ -159,6 +167,7 @@ model Supplier {
   mdgRequests      MdgRequest[]
 
   purchaseOrders PurchaseOrder[]
+  materialLots   MaterialLot[]   @relation("LotSupplier")
 
   @@index([status])
 }
@@ -341,6 +350,7 @@ enum GoodsReceiptStatus {
 
 enum InventoryMovementType {
   GOODS_RECEIPT
+  PRODUCTION_RECEIPT
   MATERIAL_ISSUE
   STOCK_TRANSFER
   ADJUSTMENT
@@ -374,6 +384,8 @@ model StorageLocation {
   inventoryLedger   InventoryLedger[]
   inventoryBalances InventoryBalance[]
   goodsReceiptLines GoodsReceiptLine[]
+  materialLots      MaterialLot[]
+  finishedGoodLots  FinishedGoodLot[] @relation("FgLotLocation")
 
   @@unique([warehouseId, code])
 }
@@ -747,8 +759,9 @@ model ProductionOrder {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  components ProductionOrderComponent[]
-  operations ProductionOrderOperation[]
+  components       ProductionOrderComponent[]
+  operations       ProductionOrderOperation[]
+  finishedGoodLots FinishedGoodLot[]
 
   @@index([status])
   @@index([parentMaterialId])
@@ -771,6 +784,8 @@ model ProductionOrderComponent {
   reservedQuantity Decimal @default(0) @db.Decimal(16, 4)
 
   notes String?
+
+  lotConsumptions MaterialLotConsumption[]
 
   @@unique([productionOrderId, lineNumber])
   @@index([materialId])
@@ -798,4 +813,78 @@ model ProductionOrderOperation {
 
   @@unique([productionOrderId, sequence])
   @@index([workCenterId, status])
+}
+
+// =========================================================================
+// PHASE 3 chunk 6: lot tracking + traceability
+// =========================================================================
+
+model MaterialLot {
+  id                String          @id @default(cuid())
+  lotNumber         String          @unique
+
+  materialId        String
+  material          Material        @relation(fields: [materialId], references: [id])
+
+  quantityReceived  Decimal         @db.Decimal(16, 4)
+  quantityRemaining Decimal         @db.Decimal(16, 4)
+  unitOfMeasureId   String
+  unitOfMeasure     UnitOfMeasure   @relation(fields: [unitOfMeasureId], references: [id])
+  storageLocationId String
+  storageLocation   StorageLocation @relation(fields: [storageLocationId], references: [id])
+
+  // Polymorphic provenance
+  sourceType        String          // "GoodsReceipt" | "InitialStock"
+  sourceRefId       String          // id of the source document
+  supplierId        String?
+  supplier          Supplier?       @relation("LotSupplier", fields: [supplierId], references: [id])
+  receivedAt        DateTime
+
+  notes             String?
+  createdAt         DateTime        @default(now())
+
+  consumptions      MaterialLotConsumption[]
+
+  @@index([materialId, quantityRemaining])
+  @@index([sourceType, sourceRefId])
+  @@index([materialId, storageLocationId, quantityRemaining])
+}
+
+model MaterialLotConsumption {
+  id                         String                   @id @default(cuid())
+  productionOrderComponentId String
+  productionOrderComponent   ProductionOrderComponent @relation(fields: [productionOrderComponentId], references: [id], onDelete: Cascade)
+  materialLotId              String
+  materialLot                MaterialLot              @relation(fields: [materialLotId], references: [id])
+  quantity                   Decimal                  @db.Decimal(16, 4)
+  postedById                 String
+  postedBy                   User                     @relation("LotConsumptionPostedBy", fields: [postedById], references: [id])
+  postedAt                   DateTime                 @default(now())
+  notes                      String?
+
+  @@index([productionOrderComponentId])
+  @@index([materialLotId])
+}
+
+model FinishedGoodLot {
+  id                String          @id @default(cuid())
+  lotNumber         String          @unique
+
+  materialId        String
+  material          Material        @relation("FgLotMaterial", fields: [materialId], references: [id])
+  productionOrderId String
+  productionOrder   ProductionOrder @relation(fields: [productionOrderId], references: [id])
+
+  quantity          Decimal         @db.Decimal(16, 4)
+  unitOfMeasureId   String
+  unitOfMeasure     UnitOfMeasure   @relation("FgLotUom", fields: [unitOfMeasureId], references: [id])
+  storageLocationId String
+  storageLocation   StorageLocation @relation("FgLotLocation", fields: [storageLocationId], references: [id])
+
+  receivedAt        DateTime        @default(now())
+  notes             String?
+  createdAt         DateTime        @default(now())
+
+  @@index([productionOrderId])
+  @@index([materialId])
 }

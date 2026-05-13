@@ -8,11 +8,16 @@ import {
   releaseProductionOrder,
   cancelProductionOrder,
   issueMaterialsToOrder,
+  confirmOperation,
+  skipOperation,
+  receiveFinishedGoods,
   type ProductionOrderListItem,
 } from "@/lib/services/production-order";
 import type {
   CreateProductionOrderInput,
   IssueMaterialsInput,
+  ConfirmOperationInput,
+  ReceiveFinishedGoodsInput,
 } from "@/lib/validators/production-order";
 
 const LIST_PATH = "/manufacturing/production-orders";
@@ -60,6 +65,42 @@ export async function issueMaterialsAction(input: IssueMaterialsInput) {
   const user = await requireCurrentUser();
   const result = await issueMaterialsToOrder(input, user.id);
   revalidateAfterIssue(result.id);
+  redirect(detailPath(result.id));
+}
+
+export async function confirmOperationAction(input: ConfirmOperationInput) {
+  const user = await requireCurrentUser();
+  await confirmOperation(input, user.id);
+  revalidatePath(detailPath(input.productionOrderId));
+  revalidatePath(LIST_PATH);
+  redirect(detailPath(input.productionOrderId));
+}
+
+export async function skipOperationFormAction(formData: FormData) {
+  const productionOrderId = formData.get("productionOrderId");
+  const operationId = formData.get("operationId");
+  const reason = formData.get("reason");
+  if (typeof productionOrderId !== "string") throw new Error("productionOrderId required");
+  if (typeof operationId !== "string") throw new Error("operationId required");
+  if (typeof reason !== "string" || !reason.trim()) {
+    throw new Error("Skip reason is required");
+  }
+  const user = await requireCurrentUser();
+  await skipOperation(
+    { productionOrderId, operationId, reason: reason.trim() },
+    user.id,
+  );
+  revalidatePath(detailPath(productionOrderId));
+  revalidatePath(LIST_PATH);
+}
+
+export async function receiveFgAction(input: ReceiveFinishedGoodsInput) {
+  const user = await requireCurrentUser();
+  const result = await receiveFinishedGoods(input, user.id);
+  revalidatePath(detailPath(input.productionOrderId));
+  revalidatePath(LIST_PATH);
+  for (const p of INVENTORY_PATHS) revalidatePath(p);
+  // Always send back to the order detail (whether COMPLETED or still IN_PROGRESS)
   redirect(detailPath(result.id));
 }
 

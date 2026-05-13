@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { listWorkCenters } from "@/lib/services/work-center";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -41,7 +42,14 @@ export default async function WorkCentersPage() {
           <TableBody>
             {wcs.map((w) => (
               <TableRow key={w.id}>
-                <TableCell className="font-mono">{w.code}</TableCell>
+                <TableCell>
+                  <Link
+                    href={`/manufacturing/work-centers/${w.id}`}
+                    className="font-mono font-medium underline"
+                  >
+                    {w.code}
+                  </Link>
+                </TableCell>
                 <TableCell>
                   <div className="font-medium">{w.name}</div>
                   {w.description && (

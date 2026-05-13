@@ -6,12 +6,19 @@ import { postInventoryMovement } from "@/lib/services/inventory";
 import {
   createProductionOrderSchema,
   issueMaterialsSchema,
+  confirmOperationSchema,
+  skipOperationSchema,
+  receiveFinishedGoodsSchema,
   type CreateProductionOrderInput,
   type IssueMaterialsInput,
+  type ConfirmOperationInput,
+  type SkipOperationInput,
+  type ReceiveFinishedGoodsInput,
 } from "@/lib/validators/production-order";
 import {
   Prisma,
   ProductionOrderStatus,
+  ProductionOperationStatus,
   MasterDataStatus,
   BillOfMaterialsStatus,
   RoutingStatus,
@@ -609,7 +616,11 @@ export async function issueMaterialsToOrder(
       });
     }
 
-    // Post movements + update components
+    // Post movements + update components + consume lots FIFO
+    // (Phase 3 chunk 6: lot tracking. If no lots exist for the material at the
+    // chosen location — e.g. legacy stock from an ADJUSTMENT — we still issue
+    // against balance, just without creating consumption rows. The trace will
+    // show "no lot info" for that consumption.)
     for (const v of validated) {
       await postInventoryMovement(tx, {
         movementType: InventoryMovementType.MATERIAL_ISSUE,
@@ -629,6 +640,38 @@ export async function issueMaterialsToOrder(
           reservedQuantity: { decrement: v.quantity },
         },
       });
+
+      // FIFO lot consumption (oldest receivedAt first)
+      const availableLots = await tx.materialLot.findMany({
+        where: {
+          materialId: v.component.materialId,
+          storageLocationId: v.storageLocationId,
+          quantityRemaining: { gt: 0 },
+        },
+        orderBy: { receivedAt: "asc" },
+      });
+      let remainingToConsume = v.quantity;
+      for (const lot of availableLots) {
+        if (remainingToConsume.lte(0)) break;
+        const fromThisLot = remainingToConsume.lte(lot.quantityRemaining)
+          ? remainingToConsume
+          : lot.quantityRemaining;
+        await tx.materialLotConsumption.create({
+          data: {
+            productionOrderComponentId: v.component.id,
+            materialLotId: lot.id,
+            quantity: fromThisLot,
+            postedById: actorId,
+            notes: v.notes,
+          },
+        });
+        await tx.materialLot.update({
+          where: { id: lot.id },
+          data: { quantityRemaining: { decrement: fromThisLot } },
+        });
+        remainingToConsume = remainingToConsume.sub(fromThisLot);
+      }
+      // remainingToConsume > 0 here = legacy untracked stock; we still issued it.
     }
 
     // Status flip on first issue
@@ -710,4 +753,503 @@ export async function getOrderComponentSourceBalances(orderId: string) {
   );
 
   return { order, componentsWithStock };
+}
+
+// =====================================================================
+// Operation confirm / skip + work-center queue (Chunk 4)
+// =====================================================================
+
+/**
+ * Confirm a routing operation: capture actual setup + run hours, mark
+ * status CONFIRMED. If the parent order is RELEASED, flip to IN_PROGRESS
+ * (operation activity counts as starting the order, same as a material issue).
+ *
+ * Sequence enforcement: NOT enforced for the demo — real ERP would require
+ * earlier operations to be CONFIRMED or SKIPPED before this one can confirm.
+ * Add as a TODO when needed; a single sub-query inside this tx covers it.
+ */
+export async function confirmOperation(
+  input: ConfirmOperationInput,
+  actorId: string,
+): Promise<{ id: string; status: ProductionOperationStatus }> {
+  const parsed = confirmOperationSchema.parse(input);
+
+  const actor = await loadActor(actorId);
+  if (
+    actor.role !== UserRole.REQUESTER &&
+    actor.role !== UserRole.APPROVER &&
+    actor.role !== UserRole.ADMIN
+  ) {
+    throw new ForbiddenError(`Role ${actor.role} cannot confirm operations`);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const op = await tx.productionOrderOperation.findUnique({
+      where: { id: parsed.operationId },
+      include: {
+        productionOrder: { select: { id: true, status: true, startedAt: true } },
+        workCenter: { select: { code: true } },
+      },
+    });
+    if (!op) throw new Error(`Operation ${parsed.operationId} not found`);
+    if (op.productionOrderId !== parsed.productionOrderId) {
+      throw new Error("Operation does not belong to this production order");
+    }
+    if (
+      op.status !== ProductionOperationStatus.PENDING &&
+      op.status !== ProductionOperationStatus.IN_PROGRESS
+    ) {
+      throw new Error(
+        `Cannot confirm operation in status ${op.status} (must be PENDING or IN_PROGRESS)`,
+      );
+    }
+    const orderStatus = op.productionOrder.status;
+    if (
+      orderStatus !== ProductionOrderStatus.RELEASED &&
+      orderStatus !== ProductionOrderStatus.IN_PROGRESS
+    ) {
+      throw new Error(
+        `Order must be RELEASED or IN_PROGRESS to confirm operations (currently ${orderStatus})`,
+      );
+    }
+
+    const now = new Date();
+
+    await tx.productionOrderOperation.update({
+      where: { id: op.id },
+      data: {
+        status: ProductionOperationStatus.CONFIRMED,
+        actualSetupHours: new Prisma.Decimal(parsed.actualSetupHours),
+        actualRunHours: new Prisma.Decimal(parsed.actualRunHours),
+        notes: parsed.notes ?? op.notes,
+        startedAt: op.startedAt ?? now,
+        completedAt: now,
+      },
+    });
+
+    // First activity? Flip RELEASED → IN_PROGRESS
+    let orderStatusChanged = false;
+    if (orderStatus === ProductionOrderStatus.RELEASED) {
+      await tx.productionOrder.update({
+        where: { id: op.productionOrder.id },
+        data: {
+          status: ProductionOrderStatus.IN_PROGRESS,
+          startedAt: op.productionOrder.startedAt ?? now,
+        },
+      });
+      orderStatusChanged = true;
+    }
+
+    await writeAudit({
+      entityType: "ProductionOrder",
+      entityId: op.productionOrder.id,
+      action: "CONFIRM_OPERATION",
+      actorId,
+      metadata: {
+        operationSequence: op.sequence,
+        operationDescription: op.description,
+        workCenterCode: op.workCenter.code,
+        plannedSetupHours: op.plannedSetupHours.toString(),
+        plannedRunHours: op.plannedRunHours.toString(),
+        actualSetupHours: parsed.actualSetupHours,
+        actualRunHours: parsed.actualRunHours,
+        setupVarianceHours: new Prisma.Decimal(parsed.actualSetupHours)
+          .sub(op.plannedSetupHours)
+          .toString(),
+        runVarianceHours: new Prisma.Decimal(parsed.actualRunHours)
+          .sub(op.plannedRunHours)
+          .toString(),
+        notes: parsed.notes ?? null,
+      },
+      tx,
+    });
+
+    if (orderStatusChanged) {
+      await writeAudit({
+        entityType: "ProductionOrder",
+        entityId: op.productionOrder.id,
+        action: "STATUS_CHANGE",
+        actorId,
+        before: { status: ProductionOrderStatus.RELEASED },
+        after: { status: ProductionOrderStatus.IN_PROGRESS },
+        metadata: {
+          triggeredBy: { type: "OperationConfirm", sequence: op.sequence },
+        },
+        tx,
+      });
+    }
+
+    return { id: op.id, status: ProductionOperationStatus.CONFIRMED };
+  });
+}
+
+/**
+ * Skip a PENDING operation with a required reason. The reason is stored on
+ * the operation's notes field AND in the audit log metadata.
+ */
+export async function skipOperation(
+  input: SkipOperationInput,
+  actorId: string,
+): Promise<{ id: string; status: ProductionOperationStatus }> {
+  const parsed = skipOperationSchema.parse(input);
+
+  const actor = await loadActor(actorId);
+  if (actor.role !== UserRole.APPROVER && actor.role !== UserRole.ADMIN) {
+    throw new ForbiddenError(`Role ${actor.role} cannot skip operations`);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const op = await tx.productionOrderOperation.findUnique({
+      where: { id: parsed.operationId },
+      include: {
+        productionOrder: { select: { id: true } },
+        workCenter: { select: { code: true } },
+      },
+    });
+    if (!op) throw new Error(`Operation ${parsed.operationId} not found`);
+    if (op.productionOrderId !== parsed.productionOrderId) {
+      throw new Error("Operation does not belong to this production order");
+    }
+    if (op.status !== ProductionOperationStatus.PENDING) {
+      throw new Error(
+        `Can only skip PENDING operations (currently ${op.status})`,
+      );
+    }
+
+    const now = new Date();
+
+    await tx.productionOrderOperation.update({
+      where: { id: op.id },
+      data: {
+        status: ProductionOperationStatus.SKIPPED,
+        notes: parsed.reason,
+        completedAt: now,
+      },
+    });
+
+    await writeAudit({
+      entityType: "ProductionOrder",
+      entityId: op.productionOrder.id,
+      action: "SKIP_OPERATION",
+      actorId,
+      metadata: {
+        operationSequence: op.sequence,
+        operationDescription: op.description,
+        workCenterCode: op.workCenter.code,
+        reason: parsed.reason,
+      },
+      tx,
+    });
+
+    return { id: op.id, status: ProductionOperationStatus.SKIPPED };
+  });
+}
+
+/**
+ * Operation queue at a work center: only operations whose order is currently
+ * RELEASED or IN_PROGRESS, and whose own status is PENDING or IN_PROGRESS.
+ * Sorted by planned start of the order, then by sequence within the order.
+ */
+export async function listWorkCenterQueue(workCenterId: string) {
+  return prisma.productionOrderOperation.findMany({
+    where: {
+      workCenterId,
+      status: {
+        in: [
+          ProductionOperationStatus.PENDING,
+          ProductionOperationStatus.IN_PROGRESS,
+        ],
+      },
+      productionOrder: {
+        status: {
+          in: [
+            ProductionOrderStatus.RELEASED,
+            ProductionOrderStatus.IN_PROGRESS,
+          ],
+        },
+      },
+    },
+    include: {
+      productionOrder: {
+        include: {
+          parentMaterial: {
+            select: { id: true, materialNumber: true, name: true },
+          },
+          unitOfMeasure: { select: { code: true } },
+        },
+      },
+    },
+    orderBy: [
+      { productionOrder: { plannedStartDate: "asc" } },
+      { sequence: "asc" },
+    ],
+  });
+}
+
+// =====================================================================
+// Finished-goods receipt + completion (Chunk 5)
+// =====================================================================
+
+/**
+ * Receive finished goods (and/or scrap) from a production order.
+ *
+ * Transactional side effects:
+ *   - posts a positive PRODUCTION_RECEIPT inventory ledger entry for the
+ *     completed quantity (scrap does not enter inventory)
+ *   - upserts InventoryBalance for the parent material at the chosen location
+ *   - increments ProductionOrder.completedQuantity + scrappedQuantity
+ *   - if completed + scrapped >= planned quantity, flips status to COMPLETED
+ *     and stamps completedAt
+ *   - audits the receipt + (if applicable) the status change with yield %
+ *
+ * Constraints:
+ *   - order must be IN_PROGRESS
+ *   - completed + scrapped (running) cannot exceed planned quantity (no
+ *     over-receipt tolerance for the demo)
+ *   - storageLocationId required iff completed quantity > 0
+ */
+export async function receiveFinishedGoods(
+  input: ReceiveFinishedGoodsInput,
+  actorId: string,
+): Promise<{
+  id: string;
+  newStatus: ProductionOrderStatus;
+  completedQuantity: string;
+  scrappedQuantity: string;
+}> {
+  const parsed = receiveFinishedGoodsSchema.parse(input);
+
+  const actor = await loadActor(actorId);
+  if (
+    actor.role !== UserRole.REQUESTER &&
+    actor.role !== UserRole.APPROVER &&
+    actor.role !== UserRole.ADMIN
+  ) {
+    throw new ForbiddenError(`Role ${actor.role} cannot receive finished goods`);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const order = await tx.productionOrder.findUnique({
+      where: { id: parsed.productionOrderId },
+      include: {
+        parentMaterial: { select: { materialNumber: true } },
+      },
+    });
+    if (!order) throw new Error(`Production order ${parsed.productionOrderId} not found`);
+    if (order.status !== ProductionOrderStatus.IN_PROGRESS) {
+      throw new Error(
+        `Can only receive FG against IN_PROGRESS orders (currently ${order.status})`,
+      );
+    }
+
+    const completedQty = new Prisma.Decimal(parsed.quantity);
+    const scrappedQty = new Prisma.Decimal(parsed.scrappedQuantity ?? 0);
+    const totalNew = completedQty.add(scrappedQty);
+
+    const remaining = order.quantity
+      .sub(order.completedQuantity)
+      .sub(order.scrappedQuantity);
+    if (totalNew.gt(remaining)) {
+      throw new Error(
+        `Receiving ${totalNew.toString()} (${completedQty.toString()} good + ${scrappedQty.toString()} scrap) exceeds remaining ${remaining.toString()} (planned ${order.quantity.toString()}, already completed ${order.completedQuantity.toString()}, already scrapped ${order.scrappedQuantity.toString()})`,
+      );
+    }
+
+    // Validate + post inventory only for the *good* completed qty
+    if (completedQty.gt(0)) {
+      if (!parsed.storageLocationId) {
+        throw new Error("storageLocationId required when receiving good FG");
+      }
+      const location = await tx.storageLocation.findUnique({
+        where: { id: parsed.storageLocationId },
+        select: { id: true, isActive: true },
+      });
+      if (!location || !location.isActive) {
+        throw new Error("Storage location not found or inactive");
+      }
+      await postInventoryMovement(tx, {
+        movementType: InventoryMovementType.PRODUCTION_RECEIPT,
+        materialId: order.parentMaterialId,
+        storageLocationId: parsed.storageLocationId,
+        quantity: completedQty, // positive: inflow
+        unitOfMeasureId: order.unitOfMeasureId,
+        referenceType: "ProductionOrder",
+        referenceId: order.id,
+        postedById: actorId,
+        notes: parsed.notes,
+      });
+
+      // Phase 3 chunk 6: every FG receipt creates a tracked lot.
+      const existingLots = await tx.finishedGoodLot.count({
+        where: { productionOrderId: order.id },
+      });
+      const lotSeq = existingLots + 1;
+      await tx.finishedGoodLot.create({
+        data: {
+          lotNumber: `FG-${order.orderNumber}-${String(lotSeq).padStart(3, "0")}`,
+          materialId: order.parentMaterialId,
+          productionOrderId: order.id,
+          quantity: completedQty,
+          unitOfMeasureId: order.unitOfMeasureId,
+          storageLocationId: parsed.storageLocationId,
+          notes: parsed.notes,
+        },
+      });
+    }
+
+    // Increment counters
+    await tx.productionOrder.update({
+      where: { id: order.id },
+      data: {
+        completedQuantity: { increment: completedQty },
+        scrappedQuantity: { increment: scrappedQty },
+      },
+    });
+
+    // Re-read to evaluate completion
+    const refreshed = await tx.productionOrder.findUniqueOrThrow({
+      where: { id: order.id },
+    });
+    const totalProduced = refreshed.completedQuantity.add(refreshed.scrappedQuantity);
+    const isComplete = totalProduced.gte(refreshed.quantity);
+
+    let newStatus: ProductionOrderStatus = refreshed.status;
+    if (isComplete) {
+      newStatus = ProductionOrderStatus.COMPLETED;
+      await tx.productionOrder.update({
+        where: { id: order.id },
+        data: { status: newStatus, completedAt: new Date() },
+      });
+    }
+
+    // Audit: receive
+    await writeAudit({
+      entityType: "ProductionOrder",
+      entityId: order.id,
+      action: "RECEIVE_FG",
+      actorId,
+      metadata: {
+        completedQuantity: completedQty.toString(),
+        scrappedQuantity: scrappedQty.toString(),
+        storageLocationId: completedQty.gt(0) ? parsed.storageLocationId : null,
+        runningCompleted: refreshed.completedQuantity.toString(),
+        runningScrapped: refreshed.scrappedQuantity.toString(),
+        plannedQuantity: refreshed.quantity.toString(),
+        notes: parsed.notes ?? null,
+      },
+      tx,
+    });
+
+    if (isComplete) {
+      const yieldPercent = refreshed.completedQuantity
+        .div(totalProduced.eq(0) ? new Prisma.Decimal(1) : totalProduced)
+        .mul(100);
+      await writeAudit({
+        entityType: "ProductionOrder",
+        entityId: order.id,
+        action: "STATUS_CHANGE",
+        actorId,
+        before: { status: ProductionOrderStatus.IN_PROGRESS },
+        after: { status: ProductionOrderStatus.COMPLETED },
+        metadata: {
+          triggeredBy: { type: "FgReceipt" },
+          totalCompleted: refreshed.completedQuantity.toString(),
+          totalScrapped: refreshed.scrappedQuantity.toString(),
+          plannedQuantity: refreshed.quantity.toString(),
+          yieldPercent: yieldPercent.toString(),
+        },
+        tx,
+      });
+    }
+
+    return {
+      id: order.id,
+      newStatus,
+      completedQuantity: refreshed.completedQuantity.toString(),
+      scrappedQuantity: refreshed.scrappedQuantity.toString(),
+    };
+  });
+}
+
+/**
+ * Variance summary used by the PO detail Variance card.
+ * - Quantity: completed vs planned
+ * - Yield: completed / (completed + scrapped)
+ * - Operation hours: aggregate planned vs actual
+ */
+export type VarianceSummary = {
+  quantityPlanned: string;
+  quantityCompleted: string;
+  quantityScrapped: string;
+  quantityRemaining: string;
+  yieldPercent: string | null;
+  scrapPercent: string | null;
+  totalPlannedSetupHours: string;
+  totalPlannedRunHours: string;
+  totalActualSetupHours: string;
+  totalActualRunHours: string;
+  totalPlannedHours: string;
+  totalActualHours: string;
+  hoursVariance: string;
+  hoursVariancePercent: string | null;
+};
+
+export async function getProductionOrderVariance(
+  orderId: string,
+): Promise<VarianceSummary> {
+  const order = await prisma.productionOrder.findUniqueOrThrow({
+    where: { id: orderId },
+    include: { operations: true },
+  });
+
+  const totalPlannedSetup = order.operations.reduce(
+    (s, op) => s.add(op.plannedSetupHours),
+    new Prisma.Decimal(0),
+  );
+  const totalPlannedRun = order.operations.reduce(
+    (s, op) => s.add(op.plannedRunHours),
+    new Prisma.Decimal(0),
+  );
+  const totalActualSetup = order.operations.reduce(
+    (s, op) => s.add(op.actualSetupHours),
+    new Prisma.Decimal(0),
+  );
+  const totalActualRun = order.operations.reduce(
+    (s, op) => s.add(op.actualRunHours),
+    new Prisma.Decimal(0),
+  );
+
+  const totalPlanned = totalPlannedSetup.add(totalPlannedRun);
+  const totalActual = totalActualSetup.add(totalActualRun);
+  const totalProduced = order.completedQuantity.add(order.scrappedQuantity);
+  const yieldPct = totalProduced.gt(0)
+    ? order.completedQuantity.div(totalProduced).mul(100)
+    : null;
+  const scrapPct = totalProduced.gt(0)
+    ? order.scrappedQuantity.div(totalProduced).mul(100)
+    : null;
+  const hoursVariance = totalActual.sub(totalPlanned);
+  const hoursVariancePct = totalPlanned.gt(0)
+    ? hoursVariance.div(totalPlanned).mul(100)
+    : null;
+
+  return {
+    quantityPlanned: order.quantity.toString(),
+    quantityCompleted: order.completedQuantity.toString(),
+    quantityScrapped: order.scrappedQuantity.toString(),
+    quantityRemaining: order.quantity
+      .sub(order.completedQuantity)
+      .sub(order.scrappedQuantity)
+      .toString(),
+    yieldPercent: yieldPct ? yieldPct.toFixed(2) : null,
+    scrapPercent: scrapPct ? scrapPct.toFixed(2) : null,
+    totalPlannedSetupHours: totalPlannedSetup.toString(),
+    totalPlannedRunHours: totalPlannedRun.toString(),
+    totalActualSetupHours: totalActualSetup.toString(),
+    totalActualRunHours: totalActualRun.toString(),
+    totalPlannedHours: totalPlanned.toString(),
+    totalActualHours: totalActual.toString(),
+    hoursVariance: hoursVariance.toString(),
+    hoursVariancePercent: hoursVariancePct ? hoursVariancePct.toFixed(2) : null,
+  };
 }

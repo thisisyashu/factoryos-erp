@@ -24,6 +24,7 @@ const MOVEMENT_BADGE: Record<
   "default" | "secondary" | "destructive" | "outline"
 > = {
   GOODS_RECEIPT: "default",
+  PRODUCTION_RECEIPT: "default",
   MATERIAL_ISSUE: "outline",
   STOCK_TRANSFER: "secondary",
   ADJUSTMENT: "secondary",
@@ -57,6 +58,8 @@ function refLink(refType: string, refId: string): string | null {
   switch (refType) {
     case "GoodsReceipt":
       return `/procurement/goods-receipts/${refId}`;
+    case "ProductionOrder":
+      return `/manufacturing/production-orders/${refId}`;
     default:
       return null;
   }

@@ -40,7 +40,7 @@ The goal is not just to build ERP screens, but to show how enterprise workflows 
 | 1 | Master Data Governance (MDG) | 🟢 Foundation done | Schema + seed for User/Material/Supplier/Customer/UoM/MdgRequest/AuditLog. Approval-workflow UI deferred. |
 | 2 | Procure-to-Pay | 🟢 **Phase 2 done** | PR → PO (with conversion) → Goods Receipt → Inventory Ledger. Full UI + role-gated actions + audit. |
 | 3 | Order-to-Cash | ⚪ Planned (Phase 4) | Sales orders, shipments, customer invoicing. |
-| 4 | Plan-to-Produce | 🟡 **Phase 3 in progress** | BOM, Routing, Work Center, Production Order with BOM explosion + release + material issue. See [Phase 3 status](#phase-3--manufacturing-in-progress) below. |
+| 4 | Plan-to-Produce | 🟢 **Phase 3 done** (chunk 8 MRP optional) | BOM-driven production end-to-end: create, release, issue (FIFO lots), confirm operations, FG receipt, completion, variance. Bidirectional supplier-to-customer traceability + KPI dashboards. |
 | 5 | Inventory Management | 🟢 **Phase 2 done** | Warehouses, storage locations, ledger (immutable), balance (cached running total), dashboards (Stock / Ledger / Warehouse views). |
 | 6 | Demand & Supply Planning | ⚪ Planned (Phase 5) | Forecasts, MRP, shortage analysis. |
 | 7 | Record-to-Report (Finance) | ⚪ Planned (Phase 5) | Journal entries, AP/AR, COGS, valuation. |
@@ -128,7 +128,7 @@ npx tsx scripts/integration-test-phase2.ts
 
 BOM-driven production: turning approved materials into finished goods through routings and operations, with full inventory integration.
 
-### Done so far (Chunks 1–3)
+### Done so far (Chunks 1–7)
 
 - **Schema**: `WorkCenter`, `BillOfMaterials` + lines, `Routing` + operations, `ProductionOrder` + components + operations. 5 new enums covering BOM/Routing/Order/Operation status + work-center type.
 - **Master data seed**: 1 finished good (Compute Module CM-100), 1 semi-finished (Power Supply Board PSB-A1), 3 work centers (SMT, Assembly, Test), 1 active 5-line BOM, 1 active 3-step routing.
@@ -136,23 +136,26 @@ BOM-driven production: turning approved materials into finished goods through ro
 - **Release flow with material availability check**: per-component `available = inventory_on_hand − reserved_by_other_active_orders`; release blocked if any shortage; on release sets `reservedQuantity = plannedQuantity` per component.
 - **Material issue**: posts negative `MATERIAL_ISSUE` ledger entries (reusing the Phase 2 inventory helper), increments `issuedQuantity`, decrements `reservedQuantity`, flips `RELEASED → IN_PROGRESS` on first issue, all transactional.
 - **Cancel** for DRAFT or RELEASED orders, releases reservations.
-- 9 pages under `/manufacturing` (landing, production-orders list/new/detail, BOMs list/detail, routings list/detail, work centers list, issue-materials form).
+- **Operation confirm + skip** (Chunk 4): per-operation pages capture actual setup + run hours, compute live variance vs plan, audit `setupVarianceHours` + `runVarianceHours` in metadata. Skip requires a reason. Work-center detail page shows the live operation queue across all open orders.
+- **FG receipt + completion + variance** (Chunk 5): new `PRODUCTION_RECEIPT` inventory movement type, FG receipt posts positive ledger entries, increments `completedQuantity` + `scrappedQuantity`, auto-flips to `COMPLETED` when totals reach plan, audits with yield %. Variance card on the detail page shows planned vs actual quantity (stacked progress bar with scrap in red), yield %, scrap %, and aggregate hour variance.
+- **Lot tracking + supplier-to-customer traceability** (Chunk 6): every GR creates a `MaterialLot` tagged with supplier; every material issue does FIFO lot consumption + writes `MaterialLotConsumption` rows; every FG receipt creates a `FinishedGoodLot`. **Bidirectional trace viewer** — pick a FG lot, see every supplier lot that fed it. Pick a material lot, see every FG that contains it.
+- **Manufacturing KPI dashboard** (Chunk 7): single page aggregating order-status distribution, yield-by-material, work-center utilization (planned vs actual hours), top over-plan operations leaderboard, and cycle-time stats (avg/min/max per material). Color-coded thresholds.
+- 16 pages total under `/manufacturing` covering production orders, BOMs, routings, work centers, operation confirm/skip, FG receipt, traceability, and KPIs.
 
-### Pending (Chunks 4–7)
+### Pending (Chunk 8 — optional)
 
-- **Chunk 4** — Operation confirmations + work-center queue
-- **Chunk 5** — FG receipt + production completion + variance display
-- **Chunk 6** — Lot tracking + traceability (supplier → lot → PO → GR → production order → FG lot)
-- **Chunk 7** — Manufacturing KPI dashboards (planned vs actual, yield %, scrap %, work-center utilization, cycle time)
-- **Chunk 8 (optional)** — Demand forecast + planning runs / MRP
+- **Chunk 8** — Demand forecast + planning runs / MRP. The "planning brain" that scans demand vs on-hand + reserved + on-order, recommends production orders, and ties forecasts to actual builds.
 
 ### Verification
 
-Three integration tests cover the manufacturing path so far:
+Five integration tests cover the manufacturing path:
 
 ```bash
-npx tsx scripts/integration-test-phase3.ts          # create + BOM explosion
-npx tsx scripts/integration-test-phase3-chunk3.ts   # release + shortage + issue + status flip
+npx tsx scripts/integration-test-phase3.ts          # chunk 2: create + BOM explosion (Decimal precision)
+npx tsx scripts/integration-test-phase3-chunk3.ts   # chunk 3: release + shortage + issue + status flip
+npx tsx scripts/integration-test-phase3-chunk4.ts   # chunk 4: confirm + skip + variance metadata
+npx tsx scripts/integration-test-phase3-chunk5.ts   # chunk 5: FG receipt + completion + variance
+npx tsx scripts/integration-test-phase3-chunk6.ts   # chunk 6: lot tracking + bidirectional trace
 ```
 
 ## Getting started
@@ -245,10 +248,11 @@ scripts/
   - [x] Chunk 1 — Schema (BOM/Routing/WorkCenter/ProductionOrder) + master-data seed
   - [x] Chunk 2 — Production Order create + BOM explosion + master-data UI
   - [x] Chunk 3 — Release + material availability + material issue + IN_PROGRESS
-  - [ ] Chunk 4 — Operation confirmations + work-center queue
-  - [ ] Chunk 5 — FG receipt + completion + variance
-  - [ ] Chunk 6 — Lot tracking + traceability viewer
-  - [ ] Chunk 7 — Manufacturing KPI dashboards
+  - [x] Chunk 4 — Operation confirmations + work-center queue
+  - [x] Chunk 5 — FG receipt + completion + variance
+  - [x] Chunk 6 — Lot tracking + bidirectional traceability viewer
+  - [x] Chunk 7 — Manufacturing KPI dashboards
+  - [ ] Chunk 8 (optional) — Demand forecast + planning runs / MRP
 - [ ] **Phase 4** — Order-to-Cash (Sales Orders → Shipments → Customer invoicing)
 - [ ] **Phase 5** — Demand planning, finance posting, quality, maintenance, traceability dashboards
 

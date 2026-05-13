@@ -4,6 +4,7 @@ import {
   getProductionOrder,
   getProductionOrderAuditTrail,
   getMaterialAvailability,
+  getProductionOrderVariance,
 } from "@/lib/services/production-order";
 import { requireCurrentUser } from "@/lib/current-user";
 import {
@@ -68,10 +69,11 @@ export default async function ProductionOrderDetailPage({
 }) {
   const { id } = await params;
   const user = await requireCurrentUser();
-  const [order, audit, availability] = await Promise.all([
+  const [order, audit, availability, variance] = await Promise.all([
     getProductionOrder(id),
     getProductionOrderAuditTrail(id),
     getMaterialAvailability(id).catch(() => []),
+    getProductionOrderVariance(id).catch(() => null),
   ]);
   if (!order) notFound();
 
@@ -85,6 +87,15 @@ export default async function ProductionOrderDetailPage({
   const canIssue =
     (order.status === ProductionOrderStatus.RELEASED ||
       order.status === ProductionOrderStatus.IN_PROGRESS) &&
+    (user.role === UserRole.REQUESTER ||
+      user.role === UserRole.APPROVER ||
+      user.role === UserRole.ADMIN);
+  const remainingFg = order.quantity
+    .sub(order.completedQuantity)
+    .sub(order.scrappedQuantity);
+  const canReceiveFg =
+    order.status === ProductionOrderStatus.IN_PROGRESS &&
+    remainingFg.gt(0) &&
     (user.role === UserRole.REQUESTER ||
       user.role === UserRole.APPROVER ||
       user.role === UserRole.ADMIN);
@@ -130,9 +141,17 @@ export default async function ProductionOrderDetailPage({
           {canIssue && (
             <Link
               href={`/manufacturing/production-orders/${order.id}/issue`}
-              className={buttonVariants()}
+              className={buttonVariants({ variant: "outline" })}
             >
               Issue materials
+            </Link>
+          )}
+          {canReceiveFg && (
+            <Link
+              href={`/manufacturing/production-orders/${order.id}/receive`}
+              className={buttonVariants()}
+            >
+              Receive FG
             </Link>
           )}
         </div>
@@ -222,6 +241,133 @@ export default async function ProductionOrderDetailPage({
           )}
         </CardContent>
       </Card>
+
+      {variance && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              <span>Production variance</span>
+              {variance.yieldPercent != null && (
+                <span className="text-sm font-normal">
+                  yield{" "}
+                  <span
+                    className={
+                      Number(variance.yieldPercent) >= 95
+                        ? "text-foreground font-medium"
+                        : "text-destructive font-medium"
+                    }
+                  >
+                    {variance.yieldPercent}%
+                  </span>
+                </span>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 text-sm">
+            <div>
+              <div className="flex items-center justify-between mb-1 text-xs text-muted-foreground uppercase">
+                <span>Quantity</span>
+                <span>
+                  {variance.quantityCompleted} good · {variance.quantityScrapped}{" "}
+                  scrap · {variance.quantityRemaining} left of{" "}
+                  {variance.quantityPlanned}
+                </span>
+              </div>
+              <div className="h-3 rounded-full overflow-hidden bg-muted relative">
+                {(() => {
+                  const planned = Number(variance.quantityPlanned) || 1;
+                  const completedPct = Math.min(
+                    100,
+                    (Number(variance.quantityCompleted) / planned) * 100,
+                  );
+                  const scrappedPct = Math.min(
+                    100 - completedPct,
+                    (Number(variance.quantityScrapped) / planned) * 100,
+                  );
+                  return (
+                    <>
+                      <div
+                        className="absolute inset-y-0 left-0 bg-primary"
+                        style={{ width: `${completedPct}%` }}
+                      />
+                      <div
+                        className="absolute inset-y-0 bg-destructive/70"
+                        style={{
+                          left: `${completedPct}%`,
+                          width: `${scrappedPct}%`,
+                        }}
+                      />
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <div className="text-xs text-muted-foreground uppercase">
+                  Planned hours
+                </div>
+                <div className="font-medium tabular-nums">
+                  {Number(variance.totalPlannedHours).toFixed(2)} h
+                </div>
+                <div className="text-xs text-muted-foreground tabular-nums">
+                  setup {Number(variance.totalPlannedSetupHours).toFixed(2)} · run{" "}
+                  {Number(variance.totalPlannedRunHours).toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground uppercase">
+                  Actual hours
+                </div>
+                <div className="font-medium tabular-nums">
+                  {Number(variance.totalActualHours).toFixed(2)} h
+                </div>
+                <div className="text-xs text-muted-foreground tabular-nums">
+                  setup {Number(variance.totalActualSetupHours).toFixed(2)} · run{" "}
+                  {Number(variance.totalActualRunHours).toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground uppercase">
+                  Hours variance
+                </div>
+                <div
+                  className={`font-medium tabular-nums ${
+                    Number(variance.hoursVariance) > 0
+                      ? "text-destructive"
+                      : Number(variance.hoursVariance) < 0
+                        ? "text-foreground"
+                        : "text-muted-foreground"
+                  }`}
+                >
+                  {Number(variance.hoursVariance) > 0 ? "+" : ""}
+                  {Number(variance.hoursVariance).toFixed(2)} h
+                </div>
+                {variance.hoursVariancePercent != null && (
+                  <div className="text-xs text-muted-foreground tabular-nums">
+                    {variance.hoursVariancePercent}%
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground uppercase">
+                  Scrap rate
+                </div>
+                <div
+                  className={`font-medium tabular-nums ${
+                    variance.scrapPercent && Number(variance.scrapPercent) > 5
+                      ? "text-destructive"
+                      : ""
+                  }`}
+                >
+                  {variance.scrapPercent ?? "—"}{variance.scrapPercent ? "%" : ""}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {availability.length > 0 && (
         <Card className={hasShortage ? "border-destructive" : ""}>
@@ -360,36 +506,79 @@ export default async function ProductionOrderDetailPage({
                   <TableHead className="text-right">Actual setup</TableHead>
                   <TableHead className="text-right">Actual run</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {order.operations.map((op) => (
-                  <TableRow key={op.id}>
-                    <TableCell className="font-mono">{op.sequence}</TableCell>
-                    <TableCell>{op.description}</TableCell>
-                    <TableCell>
-                      <div className="font-medium font-mono">{op.workCenter.code}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {op.workCenter.name}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {op.plannedSetupHours.toString()}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {op.plannedRunHours.toString()}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums text-muted-foreground">
-                      {op.actualSetupHours.toString()}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums text-muted-foreground">
-                      {op.actualRunHours.toString()}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={OP_STATUS_BADGE[op.status]}>{op.status}</Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {order.operations.map((op) => {
+                  const orderActive =
+                    order.status === ProductionOrderStatus.RELEASED ||
+                    order.status === ProductionOrderStatus.IN_PROGRESS;
+                  const isPending =
+                    op.status === ProductionOperationStatus.PENDING ||
+                    op.status === ProductionOperationStatus.IN_PROGRESS;
+                  const opCanConfirm =
+                    orderActive &&
+                    isPending &&
+                    (user.role === UserRole.REQUESTER ||
+                      user.role === UserRole.APPROVER ||
+                      user.role === UserRole.ADMIN);
+                  const opCanSkip =
+                    orderActive &&
+                    op.status === ProductionOperationStatus.PENDING &&
+                    (user.role === UserRole.APPROVER ||
+                      user.role === UserRole.ADMIN);
+                  return (
+                    <TableRow key={op.id}>
+                      <TableCell className="font-mono">{op.sequence}</TableCell>
+                      <TableCell>{op.description}</TableCell>
+                      <TableCell>
+                        <div className="font-medium font-mono">{op.workCenter.code}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {op.workCenter.name}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {op.plannedSetupHours.toString()}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {op.plannedRunHours.toString()}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-muted-foreground">
+                        {op.actualSetupHours.toString()}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-muted-foreground">
+                        {op.actualRunHours.toString()}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={OP_STATUS_BADGE[op.status]}>{op.status}</Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-2 text-xs">
+                          {opCanConfirm && (
+                            <Link
+                              href={`/manufacturing/production-orders/${order.id}/operations/${op.id}/confirm`}
+                              className="underline hover:text-foreground"
+                            >
+                              Confirm
+                            </Link>
+                          )}
+                          {opCanSkip && (
+                            <Link
+                              href={`/manufacturing/production-orders/${order.id}/operations/${op.id}/skip`}
+                              className="underline text-muted-foreground hover:text-destructive"
+                            >
+                              Skip
+                            </Link>
+                          )}
+                          {!opCanConfirm && !opCanSkip && (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </CardContent>

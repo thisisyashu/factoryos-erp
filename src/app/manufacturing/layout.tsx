@@ -60,6 +60,18 @@ export default async function ManufacturingLayout({
               >
                 Work Centers
               </Link>
+              <Link
+                href="/manufacturing/traceability"
+                className="text-muted-foreground hover:text-foreground text-xs"
+              >
+                Traceability
+              </Link>
+              <Link
+                href="/manufacturing/kpis"
+                className="text-muted-foreground hover:text-foreground text-xs"
+              >
+                KPIs
+              </Link>
             </nav>
           </div>
           <div className="flex items-center gap-3 text-sm">

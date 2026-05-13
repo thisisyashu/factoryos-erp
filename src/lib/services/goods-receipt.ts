@@ -299,7 +299,9 @@ export async function postGoodsReceipt(
       });
     }
 
-    // 7. Post one inventory movement per GR line
+    // 7. Post one inventory movement per GR line + create one MaterialLot
+    //    (Phase 3 chunk 6: every receipt creates a tracked lot for traceability)
+    let lotLineSeq = 0;
     for (const grLine of gr.lines) {
       await postInventoryMovement(tx, {
         movementType: InventoryMovementType.GOODS_RECEIPT,
@@ -310,6 +312,22 @@ export async function postGoodsReceipt(
         referenceType: "GoodsReceipt",
         referenceId: gr.id,
         postedById: actorId,
+      });
+
+      lotLineSeq += 1;
+      await tx.materialLot.create({
+        data: {
+          lotNumber: `LOT-${grNumber}-L${lotLineSeq}`,
+          materialId: grLine.materialId,
+          quantityReceived: new Prisma.Decimal(grLine.quantity),
+          quantityRemaining: new Prisma.Decimal(grLine.quantity),
+          unitOfMeasureId: grLine.unitOfMeasureId,
+          storageLocationId: grLine.storageLocationId,
+          sourceType: "GoodsReceipt",
+          sourceRefId: gr.id,
+          supplierId: po.supplierId,
+          receivedAt: now,
+        },
       });
     }
 
